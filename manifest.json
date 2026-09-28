@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.zhuangbiaowei.workspace-names",
+  "name": "Workspace Names",
+  "version": "1.0.0",
+  "author": "zhuangbiaowei",
+  "license": "MIT",
+  "description": "Show each Hyprland workspace with the name of the app occupying it, next to its number.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Workspace Names",
+    "description": "Workspace numbers with the app name of the window on each workspace",
+    "category": "Compositor",
+    "allowMultiple": false,
+    "defaultSection": "left"
+  }
+}
