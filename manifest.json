@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.zhuangbiaowei.workspace-names",
   "name": "Workspace Names",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "zhuangbiaowei",
   "license": "MIT",
   "description": "Show each Hyprland workspace with the name of the app occupying it, next to its number.",

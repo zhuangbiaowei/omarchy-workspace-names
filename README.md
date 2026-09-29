@@ -30,15 +30,27 @@ omarchy bar move io.github.zhuangbiaowei.workspace-names --section left
 
 ## Names
 
-The name comes from the focused window's app class. A small built-in map turns
-common classes into friendly names (`foot` → 终端, `code` → VS Code, …).
-Override or extend the map per class with a `labels` object in the widget's
-`shell.json` entry:
+The label is the application name, never the window title (which is a document
+or page name such as `report.pdf` or `... - Chromium`). The name comes from, in
+order:
+
+1. the window's app class, mapped through a built-in table of friendly names
+   (`foot` → 终端, `code` → VS Code, …);
+2. when the window reports no class at all (some XWayland helper windows, such
+   as WeChat's document viewer), the name of the process that owns the window,
+   mapped through a built-in process table (`WeChatAppEx` → 微信).
+
+The list of windows is read straight from the compositor (`hyprctl -j clients`)
+whenever a window opens, closes, moves or changes workspace, with a periodic
+safety refresh; process names come from `ps`.
+
+Override or extend either table with a `labels` object in the widget's
+`shell.json` entry (keys are window classes or process names):
 
 ```json
 {
   "id": "io.github.zhuangbiaowei.workspace-names",
-  "labels": { "code": "Editor", "foot": "Shell" }
+  "labels": { "code": "Editor", "foot": "Shell", "WeChatAppEx": "微信" }
 }
 ```
 

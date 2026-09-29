@@ -1,6 +1,8 @@
 import QtQuick
 import QtQuick.Layouts
+import Quickshell
 import Quickshell.Hyprland
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
@@ -39,19 +41,38 @@ BarWidget {
     "zotero": "Zotero"
   })
 
+  // Friendly labels keyed by process name. Some XWayland applications open
+  // helper windows that report no window class at all (WeChat's document
+  // viewer, for instance); for those the only way to name the app is to look
+  // at the process that owns the window. Keys are matched case-insensitively.
+  readonly property var builtinProcessLabels: ({
+    "wechat": "微信",
+    "weixin": "微信",
+    "wechat-universa": "微信",
+    "wechat-universal": "微信",
+    "wechatappex": "微信",
+    "wps": "WPS",
+    "wpspdf": "WPS",
+    "wps-office": "WPS"
+  })
+
   readonly property var labelOverrides: {
     var value = setting("labels", null)
     return (value && typeof value === "object") ? value : ({})
   }
 
-  function workspaceById(id) {
-    var values = Hyprland.workspaces.values
-    for (var i = 0; i < values.length; i++) {
-      if (values[i].id === id) return values[i]
-    }
+  // Copied out of `hyprctl -j clients` (see clientsProc): workspace id ->
+  // the toplevel Hyprland would call that workspace's last window. Reading
+  // the compositor directly instead of the Quickshell workspace model is
+  // deliberate: newly created windows do not reliably surface their class
+  // through the per-workspace toplevel model, which left labels blank.
+  property var workspaceClients: ({})
 
-    return null
-  }
+  // pid -> process name, used only for windows that report no class.
+  property var processNames: ({})
+
+  // Coalesces bursts of window events into a single snapshot refresh.
+  property bool refreshQueued: false
 
   function workspaceIds() {
     var ids = [1, 2, 3, 4, 5]
@@ -66,27 +87,6 @@ BarWidget {
     return ids
   }
 
-  // The window Hyprland would report as this workspace's "last window":
-  // the most recently focused toplevel on the workspace.
-  function representativeToplevel(workspace) {
-    if (workspace === null) return null
-
-    var toplevels = workspace.toplevels.values
-    var best = null
-    var bestOrder = Number.MAX_VALUE
-
-    for (var i = 0; i < toplevels.length; i++) {
-      var ipc = toplevels[i].lastIpcObject || {}
-      var order = (typeof ipc.focusHistoryID === "number") ? ipc.focusHistoryID : 100000 + i
-      if (best === null || order < bestOrder) {
-        best = toplevels[i]
-        bestOrder = order
-      }
-    }
-
-    return best
-  }
-
   function labelForClass(cls) {
     if (!cls || cls.length === 0) return ""
 
@@ -99,22 +99,36 @@ BarWidget {
     return cls
   }
 
+  function labelForProcess(name) {
+    if (!name || name.length === 0) return ""
+
+    var over = labelOverrides[name]
+    if (over !== undefined) return String(over)
+
+    var lower = name.toLowerCase()
+    var built = builtinProcessLabels[lower]
+    if (built !== undefined) return String(built)
+
+    // The kernel truncates process names to 15 characters, so also try the
+    // class map against the truncated name before giving up.
+    built = builtinLabels[lower]
+    if (built !== undefined) return String(built)
+
+    return name
+  }
+
   // Human-readable name of the app occupying the workspace, or "" when empty.
+  // Uses the app class when present; otherwise names the process that owns the
+  // window. The window title is deliberately never used: titles are document
+  // or page names ("...pdf", "... - Chromium"), not application names.
   function workspaceName(id) {
-    var toplevel = representativeToplevel(workspaceById(id))
-    if (toplevel === null) return ""
+    var client = workspaceClients[id]
+    if (!client) return ""
 
-    var ipc = toplevel.lastIpcObject || {}
-    var cls = ipc.class && ipc.class.length > 0
-      ? ipc.class
-      : (ipc.initialClass && ipc.initialClass.length > 0 ? ipc.initialClass : "")
+    if (client.class.length > 0) return labelForClass(client.class)
 
-    if (cls.length > 0) return labelForClass(cls)
-
-    // No usable class (some XWayland apps): fall back to a trimmed title.
-    var title = ipc.title || toplevel.title || ""
-    if (title.length > 18) title = title.substring(0, 17) + "…"
-    return title
+    var proc = client.pid >= 0 ? processNames[client.pid] : ""
+    return labelForProcess(proc ? String(proc) : "")
   }
 
   // "1. Firefox" when occupied, plain "1" when the workspace has no windows.
@@ -126,9 +140,120 @@ BarWidget {
     return name.length > 0 ? number + ". " + name : number
   }
 
+  // Pick, per workspace, the client with the lowest focusHistoryID: the window
+  // Hyprland reports as focused on that workspace.
+  function applyClients(raw) {
+    var listed
+    try {
+      listed = JSON.parse(raw || "[]")
+    } catch (error) {
+      return
+    }
+    if (!Array.isArray(listed)) return
+
+    var best = ({})
+
+    for (var i = 0; i < listed.length; i++) {
+      var client = listed[i]
+      if (!client || client.mapped === false) continue
+
+      var workspace = client.workspace ? client.workspace.id : -1
+      if (typeof workspace !== "number" || workspace <= 0) continue
+
+      var order = (typeof client.focusHistoryID === "number") ? client.focusHistoryID : 100000 + i
+      var previous = best[workspace]
+      if (!previous || order < previous.order) {
+        best[workspace] = {
+          order: order,
+          class: String(client.class || client.initialClass || ""),
+          pid: (typeof client.pid === "number") ? client.pid : -1
+        }
+      }
+    }
+
+    workspaceClients = best
+  }
+
+  function applyProcessNames(raw) {
+    var result = ({})
+    var lines = String(raw || "").split("\n")
+
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].trim()
+      if (line.length === 0) continue
+
+      var space = line.indexOf(" ")
+      if (space <= 0) continue
+
+      var pid = parseInt(line.slice(0, space), 10)
+      var name = line.slice(space + 1).trim()
+      if (!isNaN(pid) && name.length > 0) result[pid] = name
+    }
+
+    processNames = result
+  }
+
+  function refresh() {
+    if (!clientsProc.running) clientsProc.running = true
+    if (!processListProc.running) processListProc.running = true
+  }
+
+  // The compositor event arrives before anything else has caught up, so refresh
+  // on the next event-loop turn. Bursts collapse into one refresh.
+  function scheduleRefresh() {
+    if (refreshQueued) return
+    refreshQueued = true
+    Qt.callLater(function() {
+      root.refreshQueued = false
+      root.refresh()
+    })
+  }
+
   function focusWorkspace(id) {
     if (!root.bar) return
     root.bar.run("hyprctl dispatch " + Util.shellQuote("hl.dsp.focus({ workspace = \"" + id + "\" })"))
+  }
+
+  Process {
+    id: clientsProc
+    command: ["hyprctl", "-j", "clients"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyClients(text)
+    }
+  }
+
+  Process {
+    id: processListProc
+    command: ["ps", "-eo", "pid=,comm="]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyProcessNames(text)
+    }
+  }
+
+  Connections {
+    target: Hyprland
+
+    function onRawEvent(event) {
+      if (!event || !event.name) return
+
+      var name = String(event.name)
+      if (name !== "openwindow" && name !== "closewindow" &&
+          name !== "movewindow" && name !== "movewindowv2" &&
+          name !== "windowtitle" && name !== "activewindow") return
+
+      root.scheduleRefresh()
+    }
+  }
+
+  // Safety net: catches anything the events above miss (and the initial load).
+  Timer {
+    interval: 3000
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.scheduleRefresh()
   }
 
   readonly property string activeGlyph: "\uDB85\uDCFB"
@@ -152,8 +277,7 @@ BarWidget {
       WidgetButton {
         required property int modelData
 
-        readonly property var workspace: root.workspaceById(modelData)
-        readonly property bool occupied: workspace !== null && workspace.toplevels.values.length > 0
+        readonly property bool occupied: root.workspaceClients[modelData] !== undefined
         readonly property bool focused: Hyprland.focusedWorkspace !== null && Hyprland.focusedWorkspace.id === modelData
 
         bar: root.bar
