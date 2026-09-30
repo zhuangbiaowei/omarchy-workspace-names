@@ -10,50 +10,66 @@ BarWidget {
   id: root
   moduleName: "io.github.zhuangbiaowei.workspace-names"
 
-  // Friendly labels for window classes. Extend or override per class with a
-  // "labels" object on this widget's shell.json entry, e.g.
-  //   { "id": "io.github.zhuangbiaowei.workspace-names", "labels": { "code": "Editor" } }
+  // Session language, used to pick from the bilingual alias tables below: the
+  // two-letter code of Qt's locale ("en", "zh", …), defaulting to English.
+  readonly property string localeLanguage: {
+    var match = String(Qt.locale().name || "").match(/^[A-Za-z]+/)
+    return match ? match[0].toLowerCase() : "en"
+  }
+
+  // Resolve an alias value. A plain string is used as-is; an object is a
+  // bilingual entry looked up by session language, falling back to "en" and
+  // then to whatever language it does have.
+  function localized(value) {
+    if (value === undefined || value === null) return ""
+
+    if (typeof value === "object") {
+      var language = localeLanguage
+      if (value[language] !== undefined) return String(value[language])
+      if (value.en !== undefined) return String(value.en)
+      for (var key in value) return String(value[key])
+      return ""
+    }
+
+    return String(value)
+  }
+
+  // Short bilingual aliases that take precedence over the system name, used only
+  // where the window class is an internal id and the registered name is missing
+  // (xfreerdp has no desktop entry) or longer than useful ("WeChat (Universal)").
+  // Everything else resolves through the desktop-entry database
+  // (desktopEntryName) and therefore follows the system locale. Use the
+  // "labels" setting for personal overrides instead of editing this table (a
+  // string or the same { "en": …, "zh": … } shape both work):
+  //   { "id": "io.github.zhuangbiaowei.workspace-names", "labels": { "foot": "Shell" } }
   readonly property var builtinLabels: ({
-    "wechat": "微信",
-    "weixin": "微信",
-    "qq": "QQ",
-    "chromium": "Chromium",
-    "google-chrome": "Chrome",
-    "firefox": "Firefox",
-    "wpsoffice": "WPS",
-    "wps": "WPS",
-    "code": "VS Code",
-    "code-oss": "VS Code",
-    "vscodium": "VSCodium",
-    "cursor": "Cursor",
-    "foot": "终端",
-    "kitty": "终端",
-    "ghostty": "终端",
-    "alacritty": "终端",
-    "telegram": "Telegram",
-    "org.telegram.desktop": "Telegram",
-    "discord": "Discord",
-    "slack": "Slack",
-    "spotify": "Spotify",
-    "mpv": "MPV",
-    "thunar": "文件",
-    "nautilus": "文件",
-    "zotero": "Zotero"
+    "wechat": { "en": "WeChat", "zh": "微信" },
+    "weixin": { "en": "WeChat", "zh": "微信" },
+    "wechat-universa": { "en": "WeChat", "zh": "微信" },
+    "wechat-universal": { "en": "WeChat", "zh": "微信" },
+    "wechatappex": { "en": "WeChat", "zh": "微信" },
+    "qq": { "en": "QQ", "zh": "QQ" },
+    "telegram": { "en": "Telegram", "zh": "Telegram" },
+    "org.telegram.desktop": { "en": "Telegram", "zh": "Telegram" },
+    "google-chrome": { "en": "Google Chrome", "zh": "Chrome" },
+    "code-oss": { "en": "VS Code", "zh": "VS Code" },
+    "vscodium": { "en": "VSCodium", "zh": "VSCodium" },
+    "cursor": { "en": "Cursor", "zh": "Cursor" },
+    "xfreerdp": { "en": "Windows", "zh": "远程桌面" }
   })
 
-  // Friendly labels keyed by process name. Some XWayland applications open
-  // helper windows that report no window class at all (WeChat's document
-  // viewer, for instance); for those the only way to name the app is to look
-  // at the process that owns the window. Keys are matched case-insensitively.
+  // Process-name aliases for XWayland applications whose helper windows report
+  // no window class at all (WeChat's document viewer, for instance). Keys are
+  // matched case-insensitively. Only consulted when the class yields nothing.
   readonly property var builtinProcessLabels: ({
-    "wechat": "微信",
-    "weixin": "微信",
-    "wechat-universa": "微信",
-    "wechat-universal": "微信",
-    "wechatappex": "微信",
-    "wps": "WPS",
-    "wpspdf": "WPS",
-    "wps-office": "WPS"
+    "wechat": { "en": "WeChat", "zh": "微信" },
+    "weixin": { "en": "WeChat", "zh": "微信" },
+    "wechat-universa": { "en": "WeChat", "zh": "微信" },
+    "wechat-universal": { "en": "WeChat", "zh": "微信" },
+    "wechatappex": { "en": "WeChat", "zh": "微信" },
+    "wps": { "en": "WPS", "zh": "WPS" },
+    "wpspdf": { "en": "WPS", "zh": "WPS" },
+    "wps-office": { "en": "WPS", "zh": "WPS" }
   })
 
   readonly property var labelOverrides: {
@@ -71,6 +87,11 @@ BarWidget {
   // pid -> process name, used only for windows that report no class.
   property var processNames: ({})
 
+  // Bumped when the desktop-entry database changes. Label bindings read it so
+  // they re-resolve once the entry list has loaded, or when an app is
+  // installed while the shell is running.
+  property int desktopEntriesRevision: 0
+
   // Coalesces bursts of window events into a single snapshot refresh.
   property bool refreshQueued: false
 
@@ -87,48 +108,145 @@ BarWidget {
     return ids
   }
 
-  function labelForClass(cls) {
-    if (!cls || cls.length === 0) return ""
+  // Turns one window class or process name into a display name, or "" when the
+  // key carries no readable name of its own.
+  function resolveLabel(value) {
+    if (!value || value.length === 0) return ""
 
-    var over = labelOverrides[cls]
-    if (over !== undefined) return String(over)
+    var over = labelOverrides[value]
+    if (over !== undefined) return localized(over)
 
-    var built = builtinLabels[cls]
-    if (built !== undefined) return String(built)
+    var lower = value.toLowerCase()
+    over = labelOverrides[lower]
+    if (over !== undefined) return localized(over)
 
-    return cls
-  }
+    var built = builtinLabels[value]
+    if (built !== undefined) return localized(built)
 
-  function labelForProcess(name) {
-    if (!name || name.length === 0) return ""
-
-    var over = labelOverrides[name]
-    if (over !== undefined) return String(over)
-
-    var lower = name.toLowerCase()
-    var built = builtinProcessLabels[lower]
-    if (built !== undefined) return String(built)
+    built = builtinProcessLabels[lower]
+    if (built !== undefined) return localized(built)
 
     // The kernel truncates process names to 15 characters, so also try the
     // class map against the truncated name before giving up.
     built = builtinLabels[lower]
-    if (built !== undefined) return String(built)
+    if (built !== undefined) return localized(built)
 
-    return name
+    return desktopEntryName(value)
+  }
+
+  // The (localized) human name from the desktop-entry database. A window class
+  // is frequently a reverse-DNS application id (org.gnome.Nautilus) whose
+  // desktop entry is what actually carries the name (Files / 文件).
+  function desktopEntryName(value) {
+    if (!value || value.length === 0) return ""
+
+    // Read the revision so QML bindings re-resolve when the entry list changes.
+    var revision = desktopEntriesRevision
+
+    var values = []
+    try {
+      values = DesktopEntries.applications.values || []
+    } catch (error) {
+      return ""
+    }
+
+    var lower = value.toLowerCase()
+
+    // 1. Desktop-file id (the file name without .desktop): org.gnome.Nautilus.
+    for (var i = 0; i < values.length; i++) {
+      if (String(values[i].id || "").toLowerCase() === lower) {
+        var byId = desktopEntryLabel(values[i])
+        if (byId.length > 0) return byId
+      }
+    }
+
+    // 2. Declared StartupWMClass (case-insensitive): code -> Code.
+    for (var j = 0; j < values.length; j++) {
+      var entry = values[j]
+      if (String(entry.startupClass || "").toLowerCase() === lower) {
+        var byClass = desktopEntryLabel(entry)
+        if (byClass.length > 0) return byClass
+      }
+    }
+
+    return ""
+  }
+
+  // Display name for a desktop entry. Terminal emulators are shown by their
+  // generic name (Terminal) rather than the emulator's own name (Foot, Kitty),
+  // because on the bar the useful fact is that the workspace holds a terminal.
+  // Everything else keeps its proper name (chromium -> Chromium, not "Web
+  // Browser"). `categories` is compared as text so it works whether it arrives
+  // as a list or a semicolon-separated string.
+  function desktopEntryLabel(entry) {
+    if (!entry) return ""
+
+    var generic = String(entry.genericName || "").trim()
+    var categories = String(entry.categories || "")
+    if (generic.length > 0 && categories.indexOf("TerminalEmulator") !== -1) return generic
+
+    var name = String(entry.name || "").trim()
+    if (name.length > 0) return name
+
+    return generic
+  }
+
+  // Trailing namespace segments that name the packaging, not the app.
+  readonly property var genericNameSegments: ({
+    "desktop": true,
+    "client": true,
+    "app": true,
+    "application": true,
+    "bin": true,
+    "linux": true,
+    "gtk": true,
+    "qt": true,
+    "gui": true
+  })
+
+  // Presentable form of a class or process name that has no override and no
+  // desktop entry, so a technical identifier is never shown verbatim. Drops a
+  // trailing namespace segment (com.spotify.Client -> Spotify) and splits
+  // dashes and camelCase.
+  function prettifyName(value) {
+    var text = String(value || "").trim()
+    if (text.length === 0) return ""
+
+    var parts = text.split(".")
+    for (var i = parts.length - 1; i >= 0; i--) {
+      var segment = parts[i].trim()
+      if (segment.length > 0 && genericNameSegments[segment.toLowerCase()] !== true) {
+        text = segment
+        break
+      }
+    }
+
+    text = text.replace(/[-_]+/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2").trim()
+    if (text.length === 0) return String(value || "")
+    return text.charAt(0).toUpperCase() + text.slice(1)
   }
 
   // Human-readable name of the app occupying the workspace, or "" when empty.
-  // Uses the app class when present; otherwise names the process that owns the
-  // window. The window title is deliberately never used: titles are document
-  // or page names ("...pdf", "... - Chromium"), not application names.
+  // Uses the app class when it resolves; otherwise falls back to the process
+  // that owns the window, then to a prettified class. The window title is
+  // deliberately never used: titles are document or page names ("...pdf",
+  // "... - Chromium"), not application names.
   function workspaceName(id) {
     var client = workspaceClients[id]
     if (!client) return ""
 
-    if (client.class.length > 0) return labelForClass(client.class)
+    var cls = client.class ? String(client.class) : ""
+    var proc = (client.pid >= 0 && processNames[client.pid]) ? String(processNames[client.pid]) : ""
 
-    var proc = client.pid >= 0 ? processNames[client.pid] : ""
-    return labelForProcess(proc ? String(proc) : "")
+    var label = resolveLabel(cls)
+    if (label.length > 0) return label
+
+    label = resolveLabel(proc)
+    if (label.length > 0) return label
+
+    if (cls.length > 0) return prettifyName(cls)
+    if (proc.length > 0) return prettifyName(proc)
+    return ""
   }
 
   // "1. Firefox" when occupied, plain "1" when the workspace has no windows.
@@ -244,6 +362,16 @@ BarWidget {
           name !== "windowtitle" && name !== "activewindow") return
 
       root.scheduleRefresh()
+    }
+  }
+
+  // The desktop-entry list loads asynchronously (and can grow while the shell
+  // runs); re-resolve labels whenever it changes.
+  Connections {
+    target: DesktopEntries
+
+    function onApplicationsChanged() {
+      root.desktopEntriesRevision++
     }
   }
 
